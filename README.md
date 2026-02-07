@@ -1,2 +1,3 @@
 - Cấp 0: Làm quen với fast api 
-pip install fastapi uvicorn
+- cài uvicorn: pip install fastapi uvicorn
+- chạy backend: python3 -m uvicorn main:app --reload
