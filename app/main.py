@@ -1,6 +1,6 @@
 from fastapi import FastAPI
-from core.config import settings
-from routers.todos import router as todos_router
+from app.core.config import settings
+from app.routers.todos import router as todos_router
 
 # Initialize FastAPI app
 app = FastAPI(

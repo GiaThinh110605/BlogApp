@@ -5,6 +5,7 @@ from typing import Optional
 
 class TodoBase(BaseModel):
     title: str
+    description: Optional[str] = None
     is_done: bool = False
     
     @validator('title')
@@ -15,7 +16,7 @@ class TodoBase(BaseModel):
 
 
 class TodoCreate(TodoBase):
-    id: int
+    pass
 
 
 class TodoUpdate(TodoBase):
@@ -24,7 +25,8 @@ class TodoUpdate(TodoBase):
 
 class Todo(TodoBase):
     id: int
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime
+    updated_at: datetime
     
     class Config:
         from_attributes = True
