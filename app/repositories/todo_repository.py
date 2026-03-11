@@ -9,12 +9,13 @@ class TodoRepository:
     """Tầng repository: Quản lý truy cập dữ liệu"""
     
     @staticmethod
-    def create(todo: TodoCreate, db: Session) -> TodoModel:
+    def create(todo: TodoCreate, db: Session, owner_id: int) -> TodoModel:
         """Tạo todo mới"""
         new_todo = TodoModel(
             title=todo.title,
             description=todo.description,
-            is_done=todo.is_done
+            is_done=todo.is_done,
+            owner_id=owner_id
         )
         db.add(new_todo)
         db.commit()
@@ -22,26 +23,30 @@ class TodoRepository:
         return new_todo
     
     @staticmethod
-    def get_by_id(todo_id: int, db: Session) -> Optional[TodoModel]:
-        """Lấy todo theo ID"""
-        return db.query(TodoModel).filter(TodoModel.id == todo_id).first()
+    def get_by_id(todo_id: int, db: Session, owner_id: int) -> Optional[TodoModel]:
+        """Lấy todo theo ID của user"""
+        return db.query(TodoModel).filter(
+            TodoModel.id == todo_id,
+            TodoModel.owner_id == owner_id
+        ).first()
     
     @staticmethod
     def get_all(
         db: Session,
+        owner_id: int,
         is_done: Optional[bool] = None,
         search: Optional[str] = None,
         sort: str = "created_at",
         limit: int = 10,
         offset: int = 0
     ) -> tuple[List[TodoModel], int]:
-        """Lấy tất cả todos với filter, search, sort, pagination từ database"""
-        query = db.query(TodoModel)
-        
+        """Lấy tất cả todos của user với filter, search, sort, pagination từ database"""
+        query = db.query(TodoModel).filter(TodoModel.owner_id == owner_id)
+
         # Filter by is_done
         if is_done is not None:
             query = query.filter(TodoModel.is_done == is_done)
-        
+
         # Search by title
         if search:
             query = query.filter(TodoModel.title.contains(search))
@@ -61,9 +66,12 @@ class TodoRepository:
         return todos, total
     
     @staticmethod
-    def update(todo_id: int, updated_data: TodoUpdate, db: Session) -> Optional[TodoModel]:
-        """Cập nhật todo"""
-        todo = db.query(TodoModel).filter(TodoModel.id == todo_id).first()
+    def update(todo_id: int, updated_data: TodoUpdate, db: Session, owner_id: int) -> Optional[TodoModel]:
+        """Cập nhật todo của user"""
+        todo = db.query(TodoModel).filter(
+            TodoModel.id == todo_id,
+            TodoModel.owner_id == owner_id
+        ).first()
         if todo:
             for key, value in updated_data.dict(exclude_unset=True).items():
                 setattr(todo, key, value)
@@ -72,9 +80,12 @@ class TodoRepository:
         return todo
     
     @staticmethod
-    def delete(todo_id: int, db: Session) -> bool:
-        """Xóa todo"""
-        todo = db.query(TodoModel).filter(TodoModel.id == todo_id).first()
+    def delete(todo_id: int, db: Session, owner_id: int) -> bool:
+        """Xóa todo của user"""
+        todo = db.query(TodoModel).filter(
+            TodoModel.id == todo_id,
+            TodoModel.owner_id == owner_id
+        ).first()
         if todo:
             db.delete(todo)
             db.commit()
@@ -82,14 +93,20 @@ class TodoRepository:
         return False
     
     @staticmethod
-    def exists(todo_id: int, db: Session) -> bool:
-        """Kiểm tra todo có tồn tại không"""
-        return db.query(TodoModel).filter(TodoModel.id == todo_id).first() is not None
+    def exists(todo_id: int, db: Session, owner_id: int) -> bool:
+        """Kiểm tra todo của user có tồn tại không"""
+        return db.query(TodoModel).filter(
+            TodoModel.id == todo_id,
+            TodoModel.owner_id == owner_id
+        ).first() is not None
     
     @staticmethod
-    def complete(todo_id: int, db: Session) -> Optional[TodoModel]:
-        """Đánh dấu todo là hoàn thành"""
-        todo = db.query(TodoModel).filter(TodoModel.id == todo_id).first()
+    def complete(todo_id: int, db: Session, owner_id: int) -> Optional[TodoModel]:
+        """Đánh dấu todo của user là hoàn thành"""
+        todo = db.query(TodoModel).filter(
+            TodoModel.id == todo_id,
+            TodoModel.owner_id == owner_id
+        ).first()
         if todo:
             todo.is_done = True
             db.commit()
