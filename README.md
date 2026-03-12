@@ -534,3 +534,451 @@ db.close()
 ✅ SQLite database  
 ✅ Error handling  
 ✅ Input validation 
+
+## Cấp 6 — Nâng cao (tag, deadline, nhắc việc)
+
+### Mục tiêu:
+Thêm tính năng giống app thật với due_date, tags, notifications
+
+### 1. Cập nhật Todo Model:
+```python
+# app/models/todo.py
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+from app.core.database import Base
+
+class Todo(Base):
+    __tablename__ = "todos"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(100), nullable=False)
+    description = Column(Text(), nullable=True)
+    is_done = Column(Boolean, default=False)
+    due_date = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    owner = relationship("User", back_populates="todos")
+    
+    # Many-to-many relationship with tags
+    tags = relationship("Tag", secondary="todo_tags", back_populates="todos")
+
+class Tag(Base):
+    __tablename__ = "tags"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), unique=True, nullable=False)
+    color = Column(String(7), default="#000000")  # Hex color
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    todos = relationship("Todo", secondary="todo_tags", back_populates="tags")
+
+class TodoTag(Base):
+    __tablename__ = "todo_tags"
+    
+    todo_id = Column(Integer, ForeignKey("todos.id"), primary_key=True)
+    tag_id = Column(Integer, ForeignKey("tags.id"), primary_key=True)
+```
+
+### 2. Cập nhật Todo Schemas:
+```python
+# app/schemas/todo.py
+from pydantic import BaseModel, Field
+from datetime import datetime, date
+from typing import List, Optional
+
+class TagBase(BaseModel):
+    name: str
+    color: str = "#000000"
+
+class Tag(TagBase):
+    id: int
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class TodoBase(BaseModel):
+    title: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    due_date: Optional[datetime] = None
+    is_done: bool = False
+
+class TodoCreate(TodoBase):
+    tag_ids: Optional[List[int]] = []
+
+class TodoUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    due_date: Optional[datetime] = None
+    is_done: Optional[bool] = None
+    tag_ids: Optional[List[int]] = None
+
+class TodoResponse(TodoBase):
+    id: int
+    owner_id: int
+    created_at: datetime
+    updated_at: Optional[datetime]
+    tags: List[Tag] = []
+    
+    class Config:
+        from_attributes = True
+
+class TodoSummary(BaseModel):
+    id: int
+    title: str
+    due_date: Optional[datetime]
+    is_done: bool
+    tags: List[str] = []
+```
+
+### 3. Tag Repository:
+```python
+# app/repositories/tag_repository.py
+from sqlalchemy.orm import Session
+from app.models.tag import Tag
+from app.schemas.todo import TagBase
+
+class TagRepository:
+    def create(self, tag: TagBase, db: Session) -> Tag:
+        db_tag = Tag(**tag.dict())
+        db.add(db_tag)
+        db.commit()
+        db.refresh(db_tag)
+        return db_tag
+    
+    def get_all(self, db: Session) -> List[Tag]:
+        return db.query(Tag).all()
+    
+    def get_by_id(self, tag_id: int, db: Session) -> Optional[Tag]:
+        return db.query(Tag).filter(Tag.id == tag_id).first()
+    
+    def get_by_name(self, name: str, db: Session) -> Optional[Tag]:
+        return db.query(Tag).filter(Tag.name == name).first()
+    
+    def get_or_create(self, tag_name: str, db: Session) -> Tag:
+        tag = self.get_by_name(tag_name, db)
+        if not tag:
+            tag = self.create(TagBase(name=tag_name), db)
+        return tag
+```
+
+### 4. Cập nhật Todo Repository:
+```python
+# app/repositories/todo_repository.py
+from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_
+from datetime import datetime, date
+from app.models.todo import Todo, Tag
+from app.schemas.todo import TodoCreate, TodoUpdate
+
+class TodoRepository:
+    def create(self, todo: TodoCreate, owner_id: int, db: Session) -> Todo:
+        db_todo = Todo(**todo.dict(exclude={"tag_ids"}), owner_id=owner_id)
+        
+        # Add tags
+        if todo.tag_ids:
+            tags = db.query(Tag).filter(Tag.id.in_(todo.tag_ids)).all()
+            db_todo.tags = tags
+        
+        db.add(db_todo)
+        db.commit()
+        db.refresh(db_todo)
+        return db_todo
+    
+    def get_user_todos(self, user_id: int, db: Session, skip: int = 0, limit: int = 100) -> List[Todo]:
+        return db.query(Todo).filter(Todo.owner_id == user_id).offset(skip).limit(limit).all()
+    
+    def get_overdue_todos(self, user_id: int, db: Session) -> List[Todo]:
+        now = datetime.utcnow()
+        return db.query(Todo).filter(
+            and_(
+                Todo.owner_id == user_id,
+                Todo.due_date < now,
+                Todo.is_done == False
+            )
+        ).all()
+    
+    def get_today_todos(self, user_id: int, db: Session) -> List[Todo]:
+        today = date.today()
+        start_of_day = datetime.combine(today, datetime.min.time())
+        end_of_day = datetime.combine(today, datetime.max.time())
+        
+        return db.query(Todo).filter(
+            and_(
+                Todo.owner_id == user_id,
+                Todo.due_date >= start_of_day,
+                Todo.due_date <= end_of_day
+            )
+        ).all()
+    
+    def get_by_id(self, todo_id: int, user_id: int, db: Session) -> Optional[Todo]:
+        return db.query(Todo).filter(
+            and_(Todo.id == todo_id, Todo.owner_id == user_id)
+        ).first()
+    
+    def update(self, todo_id: int, todo_update: TodoUpdate, user_id: int, db: Session) -> Optional[Todo]:
+        db_todo = self.get_by_id(todo_id, user_id, db)
+        if not db_todo:
+            return None
+        
+        update_data = todo_update.dict(exclude_unset=True)
+        
+        # Handle tags separately
+        tag_ids = update_data.pop("tag_ids", None)
+        
+        for field, value in update_data.items():
+            setattr(db_todo, field, value)
+        
+        # Update tags if provided
+        if tag_ids is not None:
+            tags = db.query(Tag).filter(Tag.id.in_(tag_ids)).all()
+            db_todo.tags = tags
+        
+        db.commit()
+        db.refresh(db_todo)
+        return db_todo
+    
+    def delete(self, todo_id: int, user_id: int, db: Session) -> bool:
+        db_todo = self.get_by_id(todo_id, user_id, db)
+        if not db_todo:
+            return False
+        
+        db.delete(db_todo)
+        db.commit()
+        return True
+```
+
+### 5. Cập nhật Todo Service:
+```python
+# app/services/todo_service.py
+from sqlalchemy.orm import Session
+from datetime import datetime, date
+from app.schemas.todo import TodoCreate, TodoUpdate, TodoResponse
+from app.repositories.todo_repository import TodoRepository
+from app.repositories.tag_repository import TagRepository
+
+class TodoService:
+    def __init__(self):
+        self.repo = TodoRepository()
+        self.tag_repo = TagRepository()
+    
+    def create_todo(self, todo: TodoCreate, user_id: int, db: Session) -> TodoResponse:
+        db_todo = self.repo.create(todo, user_id, db)
+        return TodoResponse.from_orm(db_todo)
+    
+    def get_todos(self, user_id: int, db: Session, skip: int = 0, limit: int = 100) -> List[TodoResponse]:
+        todos = self.repo.get_user_todos(user_id, db, skip, limit)
+        return [TodoResponse.from_orm(todo) for todo in todos]
+    
+    def get_overdue_todos(self, user_id: int, db: Session) -> List[TodoResponse]:
+        todos = self.repo.get_overdue_todos(user_id, db)
+        return [TodoResponse.from_orm(todo) for todo in todos]
+    
+    def get_today_todos(self, user_id: int, db: Session) -> List[TodoResponse]:
+        todos = self.repo.get_today_todos(user_id, db)
+        return [TodoResponse.from_orm(todo) for todo in todos]
+    
+    def get_todo_by_id(self, todo_id: int, user_id: int, db: Session) -> Optional[TodoResponse]:
+        todo = self.repo.get_by_id(todo_id, user_id, db)
+        return TodoResponse.from_orm(todo) if todo else None
+    
+    def update_todo(self, todo_id: int, todo_update: TodoUpdate, user_id: int, db: Session) -> Optional[TodoResponse]:
+        todo = self.repo.update(todo_id, todo_update, user_id, db)
+        return TodoResponse.from_orm(todo) if todo else None
+    
+    def delete_todo(self, todo_id: int, user_id: int, db: Session) -> bool:
+        return self.repo.delete(todo_id, user_id, db)
+```
+
+### 6. Cập nhật Todo Router:
+```python
+# app/routers/todos.py
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from app.core.database import get_db
+from app.core.security import get_current_user
+from app.schemas.todo import TodoCreate, TodoUpdate, TodoResponse, TodoSummary
+from app.services.todo_service import TodoService
+from app.models.user import User
+
+router = APIRouter(prefix="/todos", tags=["todos"])
+
+@router.post("/", response_model=TodoResponse)
+def create_todo(
+    todo: TodoCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    todo_service = TodoService()
+    return todo_service.create_todo(todo, current_user.id, db)
+
+@router.get("/", response_model=list[TodoResponse])
+def get_todos(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000)
+):
+    todo_service = TodoService()
+    return todo_service.get_todos(current_user.id, db, skip=skip, limit=limit)
+
+@router.get("/overdue", response_model=list[TodoResponse])
+def get_overdue_todos(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    todo_service = TodoService()
+    return todo_service.get_overdue_todos(current_user.id, db)
+
+@router.get("/today", response_model=list[TodoResponse])
+def get_today_todos(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    todo_service = TodoService()
+    return todo_service.get_today_todos(current_user.id, db)
+
+@router.get("/{todo_id}", response_model=TodoResponse)
+def get_todo(
+    todo_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    todo_service = TodoService()
+    todo = todo_service.get_todo_by_id(todo_id, current_user.id, db)
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return todo
+
+@router.put("/{todo_id}", response_model=TodoResponse)
+def update_todo(
+    todo_id: int,
+    todo_update: TodoUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    todo_service = TodoService()
+    todo = todo_service.update_todo(todo_id, todo_update, current_user.id, db)
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return todo
+
+@router.delete("/{todo_id}")
+def delete_todo(
+    todo_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    todo_service = TodoService()
+    if not todo_service.delete_todo(todo_id, current_user.id, db):
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return {"message": "Todo deleted successfully"}
+```
+
+### 7. Tag Router:
+```python
+# app/routers/tags.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.core.database import get_db
+from app.core.security import get_current_user
+from app.schemas.todo import TagBase, Tag
+from app.repositories.tag_repository import TagRepository
+from app.models.user import User
+
+router = APIRouter(prefix="/tags", tags=["tags"])
+
+@router.post("/", response_model=Tag)
+def create_tag(
+    tag: TagBase,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    tag_repo = TagRepository()
+    # Check if tag already exists
+    existing = tag_repo.get_by_name(tag.name, db)
+    if existing:
+        raise HTTPException(status_code=400, detail="Tag already exists")
+    
+    return tag_repo.create(tag, db)
+
+@router.get("/", response_model=list[Tag])
+def get_tags(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    tag_repo = TagRepository()
+    return tag_repo.get_all(db)
+```
+
+### 8. Database Migration:
+```bash
+# Generate migration cho tags và todo_tags
+alembic revision --autogenerate -m "add tags and due_date to todos"
+
+# Chạy migration
+alembic upgrade head
+```
+
+### 9. Cập nhật main.py:
+```python
+# app/main.py
+from fastapi import FastAPI
+from app.core.config import settings
+from app.routers.todos import router as todos_router
+from app.routers.auth import router as auth_router
+from app.routers.tags import router as tags_router
+
+app = FastAPI(
+    title=settings.app_name,
+    debug=settings.debug,
+    version="1.0.0"
+)
+
+app.include_router(auth_router, prefix=settings.api_v1_str)
+app.include_router(todos_router, prefix=settings.api_v1_str)
+app.include_router(tags_router, prefix=settings.api_v1_str)
+```
+
+### 10. Test API Examples:
+
+**Tạo todo với due_date và tags:**
+```bash
+curl -X 'POST' \
+  'http://localhost:8000/api/v1/todos' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer TOKEN' \
+  -d '{
+  "title": "Hoàn thành báo cáo",
+  "description": "Báo cáo quarterly",
+  "due_date": "2026-03-15T17:00:00Z",
+  "tag_ids": [1, 2]
+}'
+```
+
+**Lấy danh sách quá hạn:**
+```bash
+curl -X 'GET' \
+  'http://localhost:8000/api/v1/todos/overdue' \
+  -H 'Authorization: Bearer TOKEN'
+```
+
+**Lấy việc cần làm hôm nay:**
+```bash
+curl -X 'GET' \
+  'http://localhost:8000/api/v1/todos/today' \
+  -H 'Authorization: Bearer TOKEN'
+```
+
+### 11. Features Cấp 6:
+✅ Due date cho todos  
+✅ Tag system (many-to-many)  
+✅ Overdue todos endpoint  
+✅ Today todos endpoint  
+✅ Tag management  
+✅ Color coding cho tags  
+✅ Advanced filtering 

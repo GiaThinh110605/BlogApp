@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from app.schemas.todo import TodoCreate, Todo, TodoUpdate
 from app.repositories.todo_repository import TodoRepository
+from app.repositories.tag_repository import TagRepository
 
 
 class TodoService:
@@ -10,6 +11,7 @@ class TodoService:
     
     def __init__(self):
         self.repo = TodoRepository()
+        self.tag_repo = TagRepository()
     
     def create_todo(self, todo: TodoCreate, db: Session, owner_id: int) -> Todo:
         """Tạo todo mới"""
@@ -22,7 +24,19 @@ class TodoService:
             raise HTTPException(status_code=404, detail="Todo này không tồn tại")
         return todo
     
-    def get_todos(
+    def get_todos(self, user_id: int, db: Session, skip: int = 0, limit: int = 100) -> List[Todo]:
+        """Lấy danh sách todos của user"""
+        return self.repo.get_user_todos(user_id, db, skip, limit)
+    
+    def get_overdue_todos(self, user_id: int, db: Session) -> List[Todo]:
+        """Lấy danh sách todos quá hạn"""
+        return self.repo.get_overdue_todos(user_id, db)
+    
+    def get_today_todos(self, user_id: int, db: Session) -> List[Todo]:
+        """Lấy danh sách todos cần làm hôm nay"""
+        return self.repo.get_today_todos(user_id, db)
+    
+    def get_todos_filtered(
         self,
         db: Session,
         owner_id: int,

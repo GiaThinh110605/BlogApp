@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query, Depends
+from fastapi import APIRouter, Query, Depends, HTTPException
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.schemas.todo import TodoCreate, TodoUpdate, Todo
@@ -39,7 +39,7 @@ def get_todos(
     offset: int = Query(0, ge=0)
 ):
     """Lấy danh sách todos của user"""
-    return todo_service.get_todos(
+    return todo_service.get_todos_filtered(
         db=db,
         owner_id=current_user.id,
         is_done=is_done,
@@ -48,6 +48,24 @@ def get_todos(
         limit=limit,
         offset=offset
     )
+
+
+@router.get("/overdue", status_code=200, response_model=list[Todo])
+def get_overdue_todos(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Lấy danh sách todos quá hạn"""
+    return todo_service.get_overdue_todos(current_user.id, db)
+
+
+@router.get("/today", status_code=200, response_model=list[Todo])
+def get_today_todos(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Lấy danh sách todos cần làm hôm nay"""
+    return todo_service.get_today_todos(current_user.id, db)
 
 
 @router.get("/{todo_id}", status_code=200, response_model=Todo)
