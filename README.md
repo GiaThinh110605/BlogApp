@@ -982,3 +982,515 @@ curl -X 'GET' \
 ✅ Tag management  
 ✅ Color coding cho tags  
 ✅ Advanced filtering 
+
+## Cấp 7 — Testing + tài liệu + deploy
+
+### Mục tiêu:
+Hoàn chỉnh quy trình development với testing và documentation
+
+### 1. Cài đặt test dependencies:
+```bash
+pip install pytest pytest-asyncio httpx
+```
+
+### 2. Cấu hình test database:
+```python
+# conftest.py
+import pytest
+import asyncio
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from app.main import app
+from app.core.database import get_db, Base
+from app.core.config import settings
+
+# Test database URL (in-memory SQLite)
+SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+def override_get_db():
+    try:
+        db = TestingSessionLocal()
+        yield db
+    finally:
+        db.close()
+
+app.dependency_overrides[get_db] = override_get_db
+
+@pytest.fixture(scope="session")
+def setup_database():
+    Base.metadata.create_all(bind=engine)
+    yield
+    Base.metadata.drop_all(bind=engine)
+
+@pytest.fixture
+def client(setup_database):
+    return TestClient(app)
+
+@pytest.fixture
+def test_user():
+    return {
+        "email": "test@example.com",
+        "password": "testpassword123"
+    }
+
+@pytest.fixture
+def auth_headers(client, test_user):
+    # Register user
+    client.post("/api/v1/auth/register", json=test_user)
+    
+    # Login to get token
+    response = client.post("/api/v1/auth/login", json=test_user)
+    token = response.json()["access_token"]
+    
+    return {"Authorization": f"Bearer {token}"}
+```
+
+### 3. Test Authentication:
+```python
+# test_auth.py
+import pytest
+from fastapi import status
+
+def test_register_user(client):
+    """Test tạo user thành công"""
+    user_data = {
+        "email": "newuser@example.com",
+        "password": "password123"
+    }
+    response = client.post("/api/v1/auth/register", json=user_data)
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["email"] == user_data["email"]
+    assert "id" in data
+    assert "hashed_password" not in data
+
+def test_register_duplicate_email(client, test_user):
+    """Test register email đã tồn tại"""
+    # Register lần đầu
+    client.post("/api/v1/auth/register", json=test_user)
+    
+    # Register lần 2 - nên fail
+    response = client.post("/api/v1/auth/register", json=test_user)
+    
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "already registered" in response.json()["detail"].lower()
+
+def test_login_success(client, test_user):
+    """Test đăng nhập thành công"""
+    # Register user trước
+    client.post("/api/v1/auth/register", json=test_user)
+    
+    # Login
+    response = client.post("/api/v1/auth/login", json=test_user)
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert "access_token" in data
+    assert data["token_type"] == "bearer"
+
+def test_login_invalid_credentials(client):
+    """Test đăng nhập sai thông tin"""
+    wrong_user = {
+        "email": "wrong@example.com",
+        "password": "wrongpassword"
+    }
+    response = client.post("/api/v1/auth/login", json=wrong_user)
+    
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    assert "invalid" in response.json()["detail"].lower()
+
+def test_get_current_user(client, auth_headers):
+    """Test lấy thông tin user hiện tại"""
+    response = client.get("/api/v1/auth/me", headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert "email" in data
+    assert "id" in data
+
+def test_get_current_user_unauthorized(client):
+    """Test lấy thông tin user mà không có token"""
+    response = client.get("/api/v1/auth/me")
+    
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+```
+
+### 4. Test Todos:
+```python
+# test_todos.py
+import pytest
+from fastapi import status
+from datetime import datetime, timedelta
+
+def test_create_todo_success(client, auth_headers):
+    """Test tạo todo thành công"""
+    todo_data = {
+        "title": "Test Todo",
+        "description": "Test Description",
+        "due_date": (datetime.utcnow() + timedelta(days=1)).isoformat() + "Z",
+        "tag_ids": []
+    }
+    response = client.post("/api/v1/todos", json=todo_data, headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_201_CREATED
+    data = response.json()
+    assert data["title"] == todo_data["title"]
+    assert data["description"] == todo_data["description"]
+    assert "id" in data
+    assert "owner_id" in data
+
+def test_create_todo_validation_fail(client, auth_headers):
+    """Test tạo todo với validation fail"""
+    # Title quá ngắn
+    todo_data = {
+        "title": "ab",  # < 3 ký tự
+        "description": "Test Description"
+    }
+    response = client.post("/api/v1/todos", json=todo_data, headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+def test_get_todos_success(client, auth_headers):
+    """Test lấy danh sách todos thành công"""
+    # Tạo todo trước
+    todo_data = {
+        "title": "Test Todo",
+        "description": "Test Description"
+    }
+    client.post("/api/v1/todos", json=todo_data, headers=auth_headers)
+    
+    # Lấy danh sách
+    response = client.get("/api/v1/todos", headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert "items" in data
+    assert isinstance(data["items"], list)
+    assert len(data["items"]) > 0
+
+def test_get_todo_success(client, auth_headers):
+    """Test lấy todo cụ thể thành công"""
+    # Tạo todo trước
+    todo_data = {
+        "title": "Test Todo",
+        "description": "Test Description"
+    }
+    create_response = client.post("/api/v1/todos", json=todo_data, headers=auth_headers)
+    todo_id = create_response.json()["id"]
+    
+    # Lấy todo cụ thể
+    response = client.get(f"/api/v1/todos/{todo_id}", headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["id"] == todo_id
+    assert data["title"] == todo_data["title"]
+
+def test_get_todo_not_found(client, auth_headers):
+    """Test lấy todo không tồn tại"""
+    response = client.get("/api/v1/todos/99999", headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert "not found" in response.json()["detail"].lower()
+
+def test_get_todo_unauthorized(client):
+    """Test lấy todo mà không có token"""
+    response = client.get("/api/v1/todos/1")
+    
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+def test_update_todo_success(client, auth_headers):
+    """Test cập nhật todo thành công"""
+    # Tạo todo trước
+    todo_data = {
+        "title": "Original Title",
+        "description": "Original Description"
+    }
+    create_response = client.post("/api/v1/todos", json=todo_data, headers=auth_headers)
+    todo_id = create_response.json()["id"]
+    
+    # Cập nhật
+    update_data = {
+        "title": "Updated Title",
+        "is_done": True
+    }
+    response = client.patch(f"/api/v1/todos/{todo_id}", json=update_data, headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["title"] == "Updated Title"
+    assert data["is_done"] == True
+
+def test_delete_todo_success(client, auth_headers):
+    """Test xóa todo thành công"""
+    # Tạo todo trước
+    todo_data = {
+        "title": "Todo to Delete",
+        "description": "Will be deleted"
+    }
+    create_response = client.post("/api/v1/todos", json=todo_data, headers=auth_headers)
+    todo_id = create_response.json()["id"]
+    
+    # Xóa
+    response = client.delete(f"/api/v1/todos/{todo_id}", headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_204_NO_CONTENT
+    
+    # Kiểm tra không còn tồn tại
+    get_response = client.get(f"/api/v1/todos/{todo_id}", headers=auth_headers)
+    assert get_response.status_code == status.HTTP_404_NOT_FOUND
+
+def test_get_overdue_todos(client, auth_headers):
+    """Test lấy todos quá hạn"""
+    # Tạo overdue todo
+    overdue_todo = {
+        "title": "Overdue Todo",
+        "description": "Should be overdue",
+        "due_date": (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z"
+    }
+    client.post("/api/v1/todos", json=overdue_todo, headers=auth_headers)
+    
+    # Lấy overdue todos
+    response = client.get("/api/v1/todos/overdue", headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert isinstance(data, list)
+    # Kiểm tra có overdue todo
+    assert len(data) > 0
+    assert data[0]["is_done"] == False
+
+def test_get_today_todos(client, auth_headers):
+    """Test lấy todos hôm nay"""
+    # Tạo today todo
+    today_todo = {
+        "title": "Today Todo",
+        "description": "Should be today",
+        "due_date": datetime.utcnow().isoformat() + "Z"
+    }
+    client.post("/api/v1/todos", json=today_todo, headers=auth_headers)
+    
+    # Lấy today todos
+    response = client.get("/api/v1/todos/today", headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert isinstance(data, list)
+```
+
+### 5. Test Tags:
+```python
+# test_tags.py
+import pytest
+from fastapi import status
+
+def test_create_tag_success(client, auth_headers):
+    """Test tạo tag thành công"""
+    tag_data = {
+        "name": "work",
+        "color": "#FF0000"
+    }
+    response = client.post("/api/v1/tags", json=tag_data, headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["name"] == tag_data["name"]
+    assert data["color"] == tag_data["color"]
+    assert "id" in data
+
+def test_create_duplicate_tag(client, auth_headers):
+    """Test tạo tag trùng tên"""
+    tag_data = {
+        "name": "duplicate",
+        "color": "#00FF00"
+    }
+    
+    # Tạo lần đầu
+    client.post("/api/v1/tags", json=tag_data, headers=auth_headers)
+    
+    # Tạo lần 2 - nên fail
+    response = client.post("/api/v1/tags", json=tag_data, headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "already exists" in response.json()["detail"].lower()
+
+def test_get_tags_success(client, auth_headers):
+    """Test lấy danh sách tags"""
+    # Tạo vài tags
+    tags = [
+        {"name": "work", "color": "#FF0000"},
+        {"name": "personal", "color": "#00FF00"}
+    ]
+    for tag in tags:
+        client.post("/api/v1/tags", json=tag, headers=auth_headers)
+    
+    # Lấy danh sách
+    response = client.get("/api/v1/tags", headers=auth_headers)
+    
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert isinstance(data, list)
+    assert len(data) >= 2
+```
+
+### 6. Chạy tests:
+```bash
+# Chạy tất cả tests
+pytest
+
+# Chạy với coverage
+pytest --cov=app --cov-report=html
+
+# Chạy test cụ thể
+pytest test_auth.py -v
+
+# Chạy test với marker
+pytest -m "not slow"
+```
+
+### 7. Test Configuration (pyproject.toml):
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests"
+]
+```
+
+### 8. GitHub Actions CI/CD:
+```yaml
+# .github/workflows/test.yml
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio httpx pytest-cov
+    
+    - name: Run tests
+      run: |
+        pytest --cov=app --cov-report=xml
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+```
+
+### 9. Production Requirements:
+```txt
+# requirements-prod.txt
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+sqlalchemy==2.0.23
+alembic==1.12.1
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+pydantic==2.5.0
+pydantic-settings==2.1.0
+```
+
+### 10. Environment Variables cho Production:
+```bash
+# .env.production
+APP_NAME="FastAPI Todo App"
+DEBUG=false
+SECRET_KEY="your-production-secret-key"
+DATABASE_URL="sqlite:///./production.db"
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+```
+
+### 11. Cấu hình Production:
+```python
+# app/core/config.py
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    app_name: str = "FastAPI Todo Application"
+    debug: bool = False
+    api_v1_str: str = "/api/v1"
+    secret_key: str = "your-secret-key-here"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    database_url: str = "sqlite:///./blog_app.db"
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+
+# Load environment-specific config
+import os
+if os.getenv("ENVIRONMENT") == "production":
+    from dotenv import load_dotenv
+    load_dotenv(".env.production")
+
+settings = Settings()
+```
+
+### 12. Cập nhật requirements.txt:
+```txt
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+sqlalchemy==2.0.23
+alembic==1.12.1
+psycopg2-binary==2.9.9
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+pydantic==2.5.0
+pydantic-settings==2.1.0
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+pytest-cov==4.1.0
+```
+
+### 13. Scripts cho development:
+```bash
+#!/bin/bash
+# scripts/run_tests.sh
+echo "Running tests..."
+pytest --cov=app --cov-report=html
+
+echo "Starting development server..."
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### 14. Features Cấp 7:
+✅ Pytest testing framework  
+✅ Test coverage  
+✅ Authentication tests  
+✅ CRUD operation tests  
+✅ Validation tests  
+✅ Error handling tests  
+✅ GitHub Actions CI/CD  
+✅ Production configuration  
+✅ Environment management  
+✅ Documentation complete 
