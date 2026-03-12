@@ -99,11 +99,14 @@ def complete_todo(
     return todo_service.complete_todo(todo_id, db, current_user.id)
 
 
-@router.delete("/{todo_id}", status_code=204)
-def delete_todo(
+@router.delete("/{todo_id}")
+def soft_delete_todo(
     todo_id: int, 
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    """Xóa todo của user"""
-    todo_service.delete_todo(todo_id, db, current_user.id)
+    """Soft delete todo (chuyển vào trash)"""
+    from app.services.soft_delete_service import SoftDeleteService
+    service = SoftDeleteService()
+    service.soft_delete_todo(todo_id, current_user.id, db)
+    return {"message": "Đã chuyển todo vào trash"}

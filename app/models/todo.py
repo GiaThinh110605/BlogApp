@@ -2,8 +2,9 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Foreign
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.core.database import Base
+from app.models.base import SoftDeleteMixin
 
-class Todo(Base):
+class Todo(Base, SoftDeleteMixin):
     __tablename__ = "todos"
     
     id = Column(Integer, primary_key=True, index=True)

@@ -3,6 +3,7 @@ from app.core.config import settings
 from app.routers.todos import router as todos_router
 from app.routers.auth import router as auth_router
 from app.routers.tags import router as tags_router
+from app.routers.trash import router as trash_router
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -33,5 +34,10 @@ app.include_router(
 
 app.include_router(
     tags_router,
+    prefix=settings.api_v1_str
+)
+
+app.include_router(
+    trash_router,
     prefix=settings.api_v1_str
 )

@@ -1494,3 +1494,427 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ✅ Production configuration  
 ✅ Environment management  
 ✅ Documentation complete 
+
+## Cấp 8 — Soft Delete & nâng cao
+
+### Mục tiêu:
+Thêm soft delete và các tính năng nâng cao khác
+
+### 1. Soft Delete Implementation:
+```python
+# app/models/base.py
+from sqlalchemy import Column, DateTime
+from sqlalchemy.sql import func
+from sqlalchemy.ext.declarative import declared_attr
+from app.core.database import Base
+
+class SoftDeleteMixin:
+    """Mixin cho soft delete functionality"""
+    
+    @declared_attr
+    def deleted_at(cls):
+        return Column(DateTime(timezone=True), nullable=True)
+    
+    def soft_delete(self):
+        """Thực hiện soft delete"""
+        self.deleted_at = func.now()
+    
+    def restore(self):
+        """Khôi phục từ soft delete"""
+        self.deleted_at = None
+    
+    @property
+    def is_deleted(self):
+        """Kiểm tra đã bị xóa chưa"""
+        return self.deleted_at is not None
+```
+
+### 2. Cập nhật Todo Model:
+```python
+# app/models/todo.py
+from app.models.base import SoftDeleteMixin
+
+class Todo(Base, SoftDeleteMixin):
+    __tablename__ = "todos"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    is_done = Column(Boolean, default=False)
+    due_date = Column(DateTime(timezone=True), nullable=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    deleted_at = Column(DateTime(timezone=True), nullable=True)  # Soft delete
+    
+    # Relationships
+    owner = relationship("User", back_populates="todos")
+    tags = relationship("Tag", secondary="todo_tags", back_populates="todos")
+```
+
+### 3. Soft Delete Repository:
+```python
+# app/repositories/soft_delete_repository.py
+from typing import List, Optional
+from sqlalchemy.orm import Session
+from sqlalchemy import and_
+from datetime import datetime
+from app.models.todo import Todo
+
+class SoftDeleteRepository:
+    """Repository với soft delete support"""
+    
+    @staticmethod
+    def get_active_todos(user_id: int, db: Session, skip: int = 0, limit: int = 100) -> List[Todo]:
+        """Lấy todos chưa bị xóa"""
+        return db.query(Todo).filter(
+            and_(
+                Todo.owner_id == user_id,
+                Todo.deleted_at.is_(None)
+            )
+        ).offset(skip).limit(limit).all()
+    
+    @staticmethod
+    def get_deleted_todos(user_id: int, db: Session, skip: int = 0, limit: int = 100) -> List[Todo]:
+        """Lấy todos đã bị xóa (trash)"""
+        return db.query(Todo).filter(
+            and_(
+                Todo.owner_id == user_id,
+                Todo.deleted_at.isnot(None)
+            )
+        ).offset(skip).limit(limit).all()
+    
+    @staticmethod
+    def soft_delete_todo(todo_id: int, user_id: int, db: Session) -> Optional[Todo]:
+        """Soft delete todo"""
+        todo = db.query(Todo).filter(
+            and_(
+                Todo.id == todo_id,
+                Todo.owner_id == user_id,
+                Todo.deleted_at.is_(None)
+            )
+        ).first()
+        
+        if todo:
+            todo.deleted_at = datetime.utcnow()
+            db.commit()
+            db.refresh(todo)
+        
+        return todo
+    
+    @staticmethod
+    def restore_todo(todo_id: int, user_id: int, db: Session) -> Optional[Todo]:
+        """Khôi phục todo từ trash"""
+        todo = db.query(Todo).filter(
+            and_(
+                Todo.id == todo_id,
+                Todo.owner_id == user_id,
+                Todo.deleted_at.isnot(None)
+            )
+        ).first()
+        
+        if todo:
+            todo.deleted_at = None
+            db.commit()
+            db.refresh(todo)
+        
+        return todo
+    
+    @staticmethod
+    def permanent_delete_todo(todo_id: int, user_id: int, db: Session) -> bool:
+        """Xóa vĩnh viễn todo"""
+        todo = db.query(Todo).filter(
+            and_(
+                Todo.id == todo_id,
+                Todo.owner_id == user_id,
+                Todo.deleted_at.isnot(None)  # Chỉ xóa vĩnh viễn todo đã ở trash
+            )
+        ).first()
+        
+        if todo:
+            db.delete(todo)
+            db.commit()
+            return True
+        
+        return False
+    
+    @staticmethod
+    def empty_trash(user_id: int, db: Session) -> int:
+        """Xóa vĩnh viễn tất cả todos trong trash"""
+        todos = db.query(Todo).filter(
+            and_(
+                Todo.owner_id == user_id,
+                Todo.deleted_at.isnot(None)
+            )
+        ).all()
+        
+        count = len(todos)
+        for todo in todos:
+            db.delete(todo)
+        
+        db.commit()
+        return count
+```
+
+### 4. Soft Delete Service:
+```python
+# app/services/soft_delete_service.py
+from typing import List, Optional
+from fastapi import HTTPException
+from sqlalchemy.orm import Session
+from app.repositories.soft_delete_repository import SoftDeleteRepository
+from app.models.todo import Todo
+
+class SoftDeleteService:
+    def __init__(self):
+        self.repo = SoftDeleteRepository()
+    
+    def get_active_todos(self, user_id: int, db: Session, skip: int = 0, limit: int = 100) -> List[Todo]:
+        """Lấy todos đang hoạt động"""
+        return self.repo.get_active_todos(user_id, db, skip, limit)
+    
+    def get_deleted_todos(self, user_id: int, db: Session, skip: int = 0, limit: int = 100) -> List[Todo]:
+        """Lấy todos đã bị xóa (trash)"""
+        return self.repo.get_deleted_todos(user_id, db, skip, limit)
+    
+    def soft_delete_todo(self, todo_id: int, user_id: int, db: Session) -> Todo:
+        """Chuyển todo vào trash"""
+        todo = self.repo.soft_delete_todo(todo_id, user_id, db)
+        if not todo:
+            raise HTTPException(status_code=404, detail="Todo không tồn tại hoặc đã bị xóa")
+        return todo
+    
+    def restore_todo(self, todo_id: int, user_id: int, db: Session) -> Todo:
+        """Khôi phục todo từ trash"""
+        todo = self.repo.restore_todo(todo_id, user_id, db)
+        if not todo:
+            raise HTTPException(status_code=404, detail="Todo không tồn tại trong trash")
+        return todo
+    
+    def permanent_delete_todo(self, todo_id: int, user_id: int, db: Session) -> None:
+        """Xóa vĩnh viễn todo"""
+        if not self.repo.permanent_delete_todo(todo_id, user_id, db):
+            raise HTTPException(status_code=404, detail="Todo không tồn tại trong trash")
+    
+    def empty_trash(self, user_id: int, db: Session) -> dict:
+        """Dọn trash"""
+        count = self.repo.empty_trash(user_id, db)
+        return {"message": f"Đã xóa vĩnh viễn {count} todo", "count": count}
+```
+
+### 5. Soft Delete Router:
+```python
+# app/routers/trash.py
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.orm import Session
+from app.core.database import get_db
+from app.core.security import get_current_user
+from app.services.soft_delete_service import SoftDeleteService
+from app.schemas.todo import Todo
+from app.models.user import User
+
+router = APIRouter(prefix="/trash", tags=["trash"])
+
+@router.get("/todos", response_model=list[Todo])
+def get_deleted_todos(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000)
+):
+    """Lấy danh sách todos đã bị xóa"""
+    service = SoftDeleteService()
+    return service.get_deleted_todos(current_user.id, db, skip, limit)
+
+@router.post("/todos/{todo_id}/restore", response_model=Todo)
+def restore_todo(
+    todo_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Khôi phục todo từ trash"""
+    service = SoftDeleteService()
+    return service.restore_todo(todo_id, current_user.id, db)
+
+@router.delete("/todos/{todo_id}")
+def permanent_delete_todo(
+    todo_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Xóa vĩnh viễn todo"""
+    service = SoftDeleteService()
+    service.permanent_delete_todo(todo_id, current_user.id, db)
+    return {"message": "Đã xóa vĩnh viễn todo"}
+
+@router.delete("/empty")
+def empty_trash(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Dọn trash - xóa vĩnh viễn tất cả"""
+    service = SoftDeleteService()
+    return service.empty_trash(current_user.id, db)
+```
+
+### 6. Cập nhật Todo Router:
+```python
+# app/routers/todos.py (thêm soft delete)
+
+@router.delete("/{todo_id}")
+def soft_delete_todo(
+    todo_id: int, 
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Soft delete todo (chuyển vào trash)"""
+    service = SoftDeleteService()
+    service.soft_delete_todo(todo_id, current_user.id, db)
+    return {"message": "Đã chuyển todo vào trash"}
+```
+
+### 7. Database Migration:
+```python
+# alembic/versions/xxxx_add_soft_delete.py
+from alembic import op
+import sqlalchemy as sa
+
+def upgrade() -> None:
+    # Add deleted_at column to todos
+    op.add_column('todos', sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True))
+    
+    # Create index for better performance
+    op.create_index('ix_todos_deleted_at', 'todos', ['deleted_at'])
+
+def downgrade() -> None:
+    op.drop_index('ix_todos_deleted_at', table_name='todos')
+    op.drop_column('todos', 'deleted_at')
+```
+
+### 8. Cập nhật main.py:
+```python
+# app/main.py
+from app.routers.trash import router as trash_router
+
+app.include_router(
+    trash_router,
+    prefix=settings.api_v1_str
+)
+```
+
+### 9. Test Soft Delete:
+```python
+# test_soft_delete.py
+import pytest
+from fastapi import status
+
+def test_soft_delete_todo(client, auth_headers):
+    """Test soft delete todo"""
+    # Tạo todo
+    todo_data = {"title": "Todo to delete", "description": "Will be soft deleted"}
+    create_response = client.post("/api/v1/todos", json=todo_data, headers=auth_headers)
+    todo_id = create_response.json()["id"]
+    
+    # Soft delete
+    response = client.delete(f"/api/v1/todos/{todo_id}", headers=auth_headers)
+    assert response.status_code == status.HTTP_200_OK
+    assert "trash" in response.json()["message"].lower()
+    
+    # Kiểm tra không còn trong active todos
+    get_response = client.get("/api/v1/todos", headers=auth_headers)
+    todos = get_response.json()["items"]
+    assert todo_id not in [todo["id"] for todo in todos]
+
+def test_get_deleted_todos(client, auth_headers):
+    """Test lấy danh sách đã xóa"""
+    # Tạo và soft delete todo
+    todo_data = {"title": "Deleted todo", "description": "In trash"}
+    create_response = client.post("/api/v1/todos", json=todo_data, headers=auth_headers)
+    todo_id = create_response.json()["id"]
+    
+    client.delete(f"/api/v1/todos/{todo_id}", headers=auth_headers)
+    
+    # Lấy trash
+    response = client.get("/api/v1/trash/todos", headers=auth_headers)
+    assert response.status_code == status.HTTP_200_OK
+    
+    deleted_todos = response.json()
+    assert todo_id in [todo["id"] for todo in deleted_todos]
+
+def test_restore_todo(client, auth_headers):
+    """Test khôi phục todo"""
+    # Tạo và soft delete todo
+    todo_data = {"title": "Todo to restore", "description": "Will be restored"}
+    create_response = client.post("/api/v1/todos", json=todo_data, headers=auth_headers)
+    todo_id = create_response.json()["id"]
+    
+    client.delete(f"/api/v1/todos/{todo_id}", headers=auth_headers)
+    
+    # Restore
+    response = client.post(f"/api/v1/trash/todos/{todo_id}/restore", headers=auth_headers)
+    assert response.status_code == status.HTTP_200_OK
+    
+    # Kiểm tra todo đã quay lại active
+    get_response = client.get("/api/v1/todos", headers=auth_headers)
+    todos = get_response.json()["items"]
+    assert todo_id in [todo["id"] for todo in todos]
+
+def test_permanent_delete_todo(client, auth_headers):
+    """Test xóa vĩnh viễn"""
+    # Tạo và soft delete todo
+    todo_data = {"title": "Todo to permanent delete", "description": "Will be gone forever"}
+    create_response = client.post("/api/v1/todos", json=todo_data, headers=auth_headers)
+    todo_id = create_response.json()["id"]
+    
+    client.delete(f"/api/v1/todos/{todo_id}", headers=auth_headers)
+    
+    # Permanent delete
+    response = client.delete(f"/api/v1/trash/todos/{todo_id}", headers=auth_headers)
+    assert response.status_code == status.HTTP_200_OK
+    
+    # Kiểm tra không còn ở đâu cả
+    trash_response = client.get("/api/v1/trash/todos", headers=auth_headers)
+    deleted_todos = trash_response.json()
+    assert todo_id not in [todo["id"] for todo in deleted_todos]
+```
+
+### 10. API Examples:
+```bash
+# Soft delete todo
+curl -X 'DELETE' \
+  'http://localhost:8000/api/v1/todos/1' \
+  -H 'Authorization: Bearer TOKEN'
+
+# Lấy trash
+curl -X 'GET' \
+  'http://localhost:8000/api/v1/trash/todos' \
+  -H 'Authorization: Bearer TOKEN'
+
+# Khôi phục todo
+curl -X 'POST' \
+  'http://localhost:8000/api/v1/trash/todos/1/restore' \
+  -H 'Authorization: Bearer TOKEN'
+
+# Xóa vĩnh viễn
+curl -X 'DELETE' \
+  'http://localhost:8000/api/v1/trash/todos/1' \
+  -H 'Authorization: Bearer TOKEN'
+
+# Dọn trash
+curl -X 'DELETE' \
+  'http://localhost:8000/api/v1/trash/empty' \
+  -H 'Authorization: Bearer TOKEN'
+```
+
+### 11. Features Cấp 8:
+✅ Soft delete với deleted_at  
+✅ Trash management  
+✅ Restore functionality  
+✅ Permanent delete  
+✅ Empty trash bulk operation  
+✅ Soft delete tests  
+✅ Performance optimization với indexes  
+✅ Data protection against accidental loss 
+
+- migrate data: alembic revision --autogenerate -m "add soft delete deleted_at column"
+- alembic upgrade head
